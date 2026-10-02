@@ -8,6 +8,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, List
+from urllib.parse import urlparse
 
 import requests
 
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     def __init__(self, cfg):
         self.cfg = cfg
+        self.last_finish_reason = None
         if not cfg.api_key:
             raise ValueError("未配置 api_key（可通过环境变量 LLM_API_KEY 设置）")
         url = cfg.base_url.rstrip("/")
@@ -31,12 +33,17 @@ class LLMClient:
         logger.info("LLM 限流已启用：rate=%.2f QPS, burst=%s", rate, burst or rate)
 
     def chat(self, messages: List[dict], temperature=None, max_tokens=None, retries=None) -> str:
+        self.last_finish_reason = None
         payload = {
             "model": self.cfg.model,
             "messages": messages,
             "temperature": self.cfg.temperature if temperature is None else temperature,
             "max_tokens": self.cfg.max_tokens if max_tokens is None else max_tokens,
+            "response_format": {"type": "json_object"},
         }
+        hostname = urlparse(self.url).hostname or ""
+        if hostname == "deepseek.com" or hostname.endswith(".deepseek.com"):
+            payload["thinking"] = {"type": "disabled"}
         headers = {
             "Authorization": f"Bearer {self.cfg.api_key}",
             "Content-Type": "application/json",
@@ -56,7 +63,13 @@ class LLMClient:
                 if resp.status_code >= 400:
                     raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
                 data = resp.json()
-                return data["choices"][0]["message"]["content"]
+                choice = data["choices"][0]
+                self.last_finish_reason = choice.get("finish_reason")
+                if self.last_finish_reason == "length":
+                    logger.warning("大模型输出达到长度上限，响应可能被截断")
+                else:
+                    logger.debug("大模型响应结束原因：%s", self.last_finish_reason)
+                return choice.get("message", {}).get("content") or ""
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 wait = min(2 ** attempt * 2, 30)

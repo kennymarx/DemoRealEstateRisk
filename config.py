@@ -28,14 +28,17 @@ class AppConfig:
     output_dir: str = "./output"
 
     # ---- 输出文件名 ----
-    excel_name: str = "财务报表汇总.xlsx"
-    risk_report_name: str = "风险分析报告.json"
+    projects_subdir: str = "projects"
+    project_excel_name: str = "财务报表.xlsx"
+    project_risk_report_name: str = "风险分析报告.json"
+    comprehensive_risk_report_name: str = "综合风险报告.json"
+    comprehensive_summary_json_name: str = "综合风险信息汇总表.json"
+    comprehensive_summary_excel_name: str = "综合风险信息汇总表.xlsx"
     risk_input_file: str = "./risk_inputs.json"
 
     # ---- 风险信息汇总表 ----
     summary_json_name: str = "风险信息汇总表.json"
     summary_excel_name: str = "风险信息汇总表.xlsx"
-    reports_subdir: str = "reports"
     force_rerun: bool = False
 
     # ---- 汇总表增量备份 ----
@@ -47,9 +50,10 @@ class AppConfig:
     retry_delay: float = 5.0
 
     # ---- OCR ----
-    batch_size: int = 10
+    batch_size: int = 1
     image_exts: tuple = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff")
     fs_dir_keywords: tuple = ("财务报表", "财务报告", "报表", "财报")
+    credit_dir_keywords: tuple = ("授信报告", "授信资料", "授信材料", "授信")
     scan_max_depth: int = 4
 
     llm: LLMConfig = field(default_factory=LLMConfig)

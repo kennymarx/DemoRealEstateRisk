@@ -8,10 +8,11 @@ from pathlib import Path
 
 from cache_manager import CacheManager
 from config import AppConfig
+from credit_report_analyzer import run_credit_report_analysis
 from excel_writer import write_excel
 from llm_client import LLMClient
 from ocr_processor import OcrProcessor, merge_statements
-from risk_analyzer import analyze_project_risk, load_risk_inputs
+from risk_analyzer import analyze_project_risk, load_risk_inputs, risk_context_fingerprint
 from scanner import find_financial_dirs, iter_projects
 from summary_manager import SummaryManager, project_fingerprint, safe_filename
 
@@ -24,6 +25,7 @@ def setup_logging(verbose: bool = False):
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--root", help="项目根目录")
     p.add_argument("--output", help="输出目录")
     p.add_argument("--cache", help="缓存目录")
-    p.add_argument("--batch-size", type=int, help="每次发送给大模型的图片数量（默认 10）")
+    p.add_argument("--batch-size", type=int, help="每次发送给大模型的图片数量（默认 1）")
     p.add_argument("--base-url", help="大模型 base url")
     p.add_argument("--api-key", help="大模型 api key")
     p.add_argument("--model", help="大模型名称")
@@ -43,13 +45,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--backup-keep", type=int,
                    help="汇总表备份保留个数（默认 50，0 表示禁用备份）")
     p.add_argument("--skip-risk", action="store_true", help="只做 OCR + Excel，跳过风险分析")
+    p.add_argument("--analyze-credit-report", action="store_true",
+                   help="分析授信报告图片，并与已生成财务报表交叉形成综合风险报告")
     p.add_argument("--force-rerun", action="store_true",
                    help="忽略汇总表，强制重跑所有项目的风险分析")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
 
 
-def analyze_one_project(llm, project_name, payload, risk_inputs, summary, reports_dir):
+def analyze_one_project(llm, project_name, payload, risk_inputs, summary,
+                        project_output_dir, risk_report_name):
     fp = payload["fingerprint"]
     try:
         result = analyze_project_risk(llm, project_name, payload["statements"], risk_inputs)
@@ -67,7 +72,8 @@ def analyze_one_project(llm, project_name, payload, risk_inputs, summary, report
     })
 
     clean_result = {k: v for k, v in result.items() if k != "_raw"}
-    report_file = reports_dir / f"{safe_filename(project_name)}.json"
+    project_output_dir.mkdir(parents=True, exist_ok=True)
+    report_file = project_output_dir / risk_report_name
     report_file.write_text(
         json.dumps({
             "project_name": project_name,
@@ -125,8 +131,8 @@ def main():
 
     out_dir = Path(cfg.output_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    reports_dir = out_dir / cfg.reports_subdir
-    reports_dir.mkdir(parents=True, exist_ok=True)
+    projects_output_dir = out_dir / cfg.projects_subdir
+    projects_output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = SummaryManager(
         out_dir / cfg.summary_json_name,
@@ -135,13 +141,29 @@ def main():
         backup_keep=cfg.summary_backup_keep,
     )
 
+    if args.analyze_credit_report:
+        run_credit_report_analysis(
+            llm=llm,
+            cache=cache,
+            projects=iter_projects(cfg.root_dir),
+            project_output_root=projects_output_dir,
+            image_exts=cfg.image_exts,
+            dir_keywords=cfg.credit_dir_keywords,
+            max_depth=cfg.scan_max_depth,
+            summary_json_path=out_dir / cfg.comprehensive_summary_json_name,
+            summary_excel_path=out_dir / cfg.comprehensive_summary_excel_name,
+            project_excel_name=cfg.project_excel_name,
+            report_name=cfg.comprehensive_risk_report_name,
+            force_rerun=cfg.force_rerun,
+        )
+        return
+
     # ============ 阶段一：扫描 + OCR ============
+    risk_inputs = load_risk_inputs(cfg.risk_input_file)
     projects = iter_projects(cfg.root_dir)
     logger.info("发现 %d 个项目目录", len(projects))
 
     project_payloads = {}
-    all_statements = []
-
     for project in projects:
         fs_dirs = find_financial_dirs(project, cfg.fs_dir_keywords, cfg.scan_max_depth)
         if not fs_dirs:
@@ -149,33 +171,36 @@ def main():
             continue
 
         fingerprint = project_fingerprint(project, fs_dirs, cfg.image_exts)
+        risk_fingerprint = risk_context_fingerprint(project.name, risk_inputs)
+        fingerprint = f"{fingerprint}:{risk_fingerprint}"
 
         stmts = []
         for fs_dir in fs_dirs:
             logger.info(">>> 项目[%s] 财报目录：%s", project.name, fs_dir)
-            batches = ocr.process_dir(fs_dir)
+            batches = ocr.process_dir(fs_dir, project_name=project.name)
             stmts.extend(merge_statements(batches, project.name))
 
         if not stmts:
             logger.warning("项目 [%s] 未提取到有效报表数据", project.name)
             continue
 
+        project_output_dir = projects_output_dir / safe_filename(project.name)
+        excel_path = write_excel(
+            stmts, project_output_dir / cfg.project_excel_name
+        )
+        logger.info("✅ 项目 [%s] 财务报表已写入：%s", project.name, excel_path)
+
         project_payloads[project.name] = {
             "fs_dirs": fs_dirs,
             "fingerprint": fingerprint,
             "statements": stmts,
+            "excel_path": str(excel_path),
         }
-        all_statements.extend(stmts)
         logger.info("项目 [%s] 共提取 %d 张报表", project.name, len(stmts))
 
-    if not all_statements:
+    if not project_payloads:
         logger.error("未提取到任何财务数据，流程结束")
         return
-
-    # ============ 阶段二：写 Excel ============
-    excel_path = out_dir / cfg.excel_name
-    write_excel(all_statements, excel_path)
-    logger.info("✅ 财务报表已写入：%s", excel_path)
 
     if args.skip_risk:
         summary.export_excel()
@@ -183,48 +208,42 @@ def main():
         return
 
     # ============ 阶段三：风险分析 + 重试 ============
-    risk_inputs = load_risk_inputs(cfg.risk_input_file)
-    project_entries = {}
     to_analyze = {}
     skipped_names = []
     analyzed_names = []
 
     for name, payload in project_payloads.items():
         if (not cfg.force_rerun) and summary.is_done(name, payload["fingerprint"]):
-            logger.info("⏭  项目 [%s] 已完成且图片未变化，跳过风险分析", name)
             hist = summary.get(name)
-            if hist:
-                project_entries[name] = {
-                    "project_name": name,
-                    "risk_level": hist.get("risk_level"),
-                    "risk_score": hist.get("risk_score"),
-                    "summary": hist.get("summary"),
-                    "key_risks": hist.get("key_risks"),
-                    "from_summary": True,
-                }
-            skipped_names.append(name)
-        else:
-            to_analyze[name] = payload
+            project_output_dir = projects_output_dir / safe_filename(name)
+            project_report = project_output_dir / cfg.project_risk_report_name
+            legacy_report = Path((hist or {}).get("report_path") or "")
+            if not project_report.exists() and legacy_report.is_file():
+                project_output_dir.mkdir(parents=True, exist_ok=True)
+                project_report.write_bytes(legacy_report.read_bytes())
+                summary.upsert(name, report_path=str(project_report))
+
+            if project_report.is_file():
+                logger.info("⏭  项目 [%s] 已完成且单项目报告存在，跳过风险分析", name)
+                skipped_names.append(name)
+                continue
+
+        to_analyze[name] = payload
 
     def run_batch(batch_names, attempt: int):
         still_failed = set()
         for n in batch_names:
             payload = to_analyze[n]
-            result, err = analyze_one_project(
-                llm, n, payload, risk_inputs, summary, reports_dir
+            _, err = analyze_one_project(
+                llm, n, payload, risk_inputs, summary,
+                projects_output_dir / safe_filename(n),
+                cfg.project_risk_report_name,
             )
             if err:
                 still_failed.add(n)
                 summary.mark_failed(n, payload["fingerprint"], str(err), attempt=attempt)
-                project_entries[n] = {
-                    "project_name": n,
-                    "risk_level": "未知",
-                    "error": str(err),
-                    "attempt": attempt,
-                }
             else:
                 analyzed_names.append(n)
-                project_entries[n] = result
         return still_failed
 
     if to_analyze:
@@ -251,24 +270,7 @@ def main():
                        cfg.retry_rounds, total_attempts,
                        len(failed_names), sorted(failed_names))
 
-    # ============ 阶段四：输出 ============
-    report = {
-        "projects": list(project_entries.values()),
-        "generated_from": str(excel_path),
-        "summary": {
-            "total": len(project_payloads),
-            "analyzed": len(analyzed_names),
-            "skipped": len(skipped_names),
-            "failed": len(failed_names),
-        },
-    }
-    report_path = out_dir / cfg.risk_report_name
-    report_path.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    logger.info("✅ 全项目风险报告已写入：%s", report_path)
-
+    # ============ 阶段四：输出汇总索引 ==========
     summary_xlsx = summary.export_excel()
     logger.info("✅ 风险信息汇总表已写入：%s", summary_xlsx)
 

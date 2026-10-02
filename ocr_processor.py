@@ -45,7 +45,7 @@ class OcrProcessor:
         self.cache = cache
         self.cfg = cfg
 
-    def process_dir(self, fs_dir) -> List[dict]:
+    def process_dir(self, fs_dir, project_name=None) -> List[dict]:
         images = list_images(fs_dir, self.cfg.image_exts)
         if not images:
             logger.warning("目录 [%s] 下未找到图片", fs_dir)
@@ -56,25 +56,39 @@ class OcrProcessor:
         logger.info("目录 [%s]：共 %d 张图片，分 %d 批处理", fs_dir, len(images), len(batches))
 
         results = []
+        project_label = project_name or Path(fs_dir).parent.name
         for idx, batch in enumerate(batches, 1):
             key = CacheManager.make_batch_key(batch)
-            cached = self.cache.get(key)
+            cache_label = f"{project_label}_财务报表OCR_批次{idx}"
+            cached = self.cache.get(key, label=cache_label)
             if cached is not None:
-                logger.info("  批次 %d/%d 命中缓存，跳过", idx, len(batches))
-                results.append(cached)
-                continue
+                cached_parsed = (cached or {}).get("parsed")
+                if (isinstance(cached_parsed, dict)
+                        and isinstance(cached_parsed.get("statements"), list)
+                        and "_parse_error" not in cached_parsed):
+                    logger.info("  批次 %d/%d 命中缓存，跳过", idx, len(batches))
+                    results.append(cached)
+                    continue
+                logger.warning("  批次 %d/%d 缓存结果无效，重新识别", idx, len(batches))
 
             logger.info("  批次 %d/%d：调用大模型识别 %d 张图片…", idx, len(batches), len(batch))
             prompt = OCR_PROMPT_TEMPLATE.format(n=len(batch))
             raw = self.llm.chat_with_images([str(p) for p in batch], prompt)
-            try:
-                parsed = extract_json(raw)
-            except Exception as e:  # noqa: BLE001
-                logger.error("  批次 %d 返回内容无法解析为 JSON：%s", idx, e)
-                parsed = {"statements": [], "_parse_error": str(e)}
+            finish_reason = getattr(self.llm, "last_finish_reason", None)
+            if finish_reason not in (None, "stop"):
+                error = f"模型结束原因：{finish_reason}"
+                logger.error("  批次 %d 响应未正常结束：%s", idx, error)
+                parsed = {"statements": [], "_parse_error": error}
+            else:
+                try:
+                    parsed = extract_json(raw)
+                except Exception as e:  # noqa: BLE001
+                    logger.error("  批次 %d 返回内容无法解析为 JSON：%s", idx, e)
+                    parsed = {"statements": [], "_parse_error": str(e)}
 
             record = {"images": [str(p) for p in batch], "raw": raw, "parsed": parsed}
-            self.cache.set(key, record)
+            if "_parse_error" not in parsed:
+                self.cache.set(key, record, label=cache_label)
             results.append(record)
         return results
 
