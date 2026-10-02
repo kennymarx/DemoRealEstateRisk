@@ -1,0 +1,26 @@
+{
+  "developers": {
+    "示例地产集团有限公司": {
+      "credit_rating": "AA-",
+      "external_risk": "2024 年有 2 笔境内债展期，评级展望负面",
+      "news": "涉及多起建设工程施工合同纠纷诉讼"
+    },
+    "某某置业有限公司": {
+      "credit_rating": "A+",
+      "external_risk": "无公开违约记录",
+      "news": "无明显负面舆情"
+    }
+  },
+  "projects": {
+    "示例项目A": {
+      "developers": ["示例地产集团有限公司"],
+      "cooperation_risk": "我方出资 60%，对方以土地作价入股，对方近期存在资金紧张",
+      "notes": "项目位于三线城市，去化周期 28 个月"
+    },
+    "示例项目B": {
+      "developers": ["某某置业有限公司"],
+      "cooperation_risk": "我方出资 40%，对方操盘",
+      "notes": "二线城市核心地段，2023 年开盘"
+    }
+  }
+}

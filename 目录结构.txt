@@ -1,0 +1,27 @@
+realestate_risk/
+├── README.md
+├── requirements.txt
+├── run.sh
+├── run.bat
+├── bootstrap.py              ← 一键生成脚本（方式二用）
+├── .gitignore
+├── config.py
+├── rate_limiter.py
+├── llm_client.py
+├── scanner.py
+├── cache_manager.py
+├── ocr_processor.py
+├── excel_writer.py
+├── risk_analyzer.py
+├── summary_manager.py
+├── main.py
+├── risk_inputs.json
+├── projects/                 ← 放项目（自己创建）
+├── cache/                    ← 自动生成
+└── output/                   ← 自动生成
+    ├── 财务报表汇总.xlsx
+    ├── 风险分析报告.json
+    ├── 风险信息汇总表.json
+    ├── 风险信息汇总表.xlsx
+    ├── history/              ← 汇总表备份
+    └── reports/              ← 单项目详细报告
