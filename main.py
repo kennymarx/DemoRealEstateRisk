@@ -12,6 +12,7 @@ from credit_report_analyzer import run_credit_report_analysis
 from excel_writer import write_excel
 from llm_client import LLMClient
 from ocr_processor import OcrProcessor, merge_statements
+from report_markdown import write_markdown_report
 from risk_analyzer import analyze_project_risk, load_risk_inputs, risk_context_fingerprint
 from scanner import find_financial_dirs, iter_projects
 from summary_manager import SummaryManager, project_fingerprint, safe_filename
@@ -74,16 +75,21 @@ def analyze_one_project(llm, project_name, payload, risk_inputs, summary,
     clean_result = {k: v for k, v in result.items() if k != "_raw"}
     project_output_dir.mkdir(parents=True, exist_ok=True)
     report_file = project_output_dir / risk_report_name
+    report_data = {
+        "project_name": project_name,
+        "fingerprint": fp,
+        "developers": devs,
+        "report_years": years,
+        "statement_count": len(payload["statements"]),
+        "risk_result": clean_result,
+    }
     report_file.write_text(
-        json.dumps({
-            "project_name": project_name,
-            "fingerprint": fp,
-            "developers": devs,
-            "report_years": years,
-            "statement_count": len(payload["statements"]),
-            "risk_result": clean_result,
-        }, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+        json.dumps(report_data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    write_markdown_report(
+        report_data,
+        report_file.with_suffix(".md"),
+        f"{project_name}风险分析报告",
     )
 
     summary.upsert(
@@ -224,6 +230,22 @@ def main():
                 summary.upsert(name, report_path=str(project_report))
 
             if project_report.is_file():
+                markdown_report = project_report.with_suffix(".md")
+                if not markdown_report.is_file():
+                    try:
+                        report_data = json.loads(project_report.read_text(encoding="utf-8"))
+                        write_markdown_report(
+                            report_data,
+                            markdown_report,
+                            f"{name}风险分析报告",
+                        )
+                        logger.info("项目 [%s]：从已有 JSON 补生成 Markdown 报告：%s",
+                                    name, markdown_report)
+                    except (OSError, ValueError) as exc:
+                        logger.warning("项目 [%s] 风险报告 JSON 无法生成 Markdown：%s",
+                                       name, exc)
+                        to_analyze[name] = payload
+                        continue
                 logger.info("⏭  项目 [%s] 已完成且单项目报告存在，跳过风险分析", name)
                 skipped_names.append(name)
                 continue

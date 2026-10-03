@@ -5,6 +5,7 @@ __pycache__/
 .run.sh
 cache/
 output/
+output_test/
 projects/
 .idea/
 .vscode/

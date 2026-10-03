@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from cache_manager import CacheManager
 from llm_client import extract_json
+from report_markdown import write_markdown_report
 from scanner import find_financial_dirs, list_images
 from summary_manager import safe_filename
 
@@ -269,6 +270,11 @@ def run_credit_report_analysis(llm, cache, projects, project_output_root,
             try:
                 previous = json.loads(report_path.read_text(encoding="utf-8"))
                 if previous.get("fingerprint") == fingerprint:
+                    write_markdown_report(
+                        previous,
+                        report_path.with_suffix(".md"),
+                        f"{project_name}综合风险报告",
+                    )
                     records.append(previous["risk_result"] | {"report_path": str(report_path)})
                     logger.info("项目 [%s] 输入未变化，复用综合风险报告", project_name)
                     counts["reused"] += 1
@@ -306,12 +312,17 @@ def run_credit_report_analysis(llm, cache, projects, project_output_root,
             "risk_result": result,
         }
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        markdown_path = write_markdown_report(
+            report,
+            report_path.with_suffix(".md"),
+            f"{project_name}综合风险报告",
+        )
         records.append(result | {"report_path": str(report_path)})
         counts["analyzed"] += 1
         logger.info(
             "项目 [%s]：综合分析完成，风险=%s，评分=%s，报告=%s",
             project_name, result.get("risk_level", "未知"),
-            result.get("risk_score", "未知"), report_path,
+            result.get("risk_score", "未知"), markdown_path,
         )
 
     write_comprehensive_summary(records, summary_json_path, summary_excel_path)
