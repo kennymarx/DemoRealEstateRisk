@@ -140,6 +140,39 @@ def statements_to_text(statements, max_rows_per_stmt: int = 150) -> str:
     return "\n".join(lines) if lines else "（未提取到财务数据）"
 
 
+def _extract_sort_text(item) -> str:
+    if isinstance(item, dict):
+        return " ".join(
+            str(item.get(key) or "")
+            for key in ("risk", "description", "title", "note", "summary", "suggestion", "action")
+        )
+    return str(item or "")
+
+
+def _risk_priority(item) -> int:
+    text = _extract_sort_text(item).lower()
+    if not text:
+        return 2
+    if any(term in text for term in (
+        "违约", "逾期", "诉讼", "冻结", "被执行", "现金短债比", "流动性", "偿债", "到期",
+        "债务", "负债率", "亏损", "经营现金流", "现金流", "缺口", "高风险", "暂缓新增",
+        "暂停", "退出", "限制性准入", "提高首付比例", "强化增信"
+    )):
+        return 0
+    if any(term in text for term in (
+        "收入下降", "存货", "毛利率", "收窄", "筹资", "监测", "补充数据", "项目缺失",
+        "补充项目", "整改", "审慎", "预售资金", "受托支付"
+    )):
+        return 1
+    return 2
+
+
+def _sort_risk_items(items):
+    if not isinstance(items, list):
+        return items
+    return sorted(items, key=_risk_priority)
+
+
 def analyze_project_risk(llm: LLMClient, project_name: str, statements, risk_inputs: dict) -> dict:
     report_years = sorted({
         str(st.get("year")).strip()
@@ -158,5 +191,8 @@ def analyze_project_risk(llm: LLMClient, project_name: str, statements, risk_inp
     except Exception as e:  # noqa: BLE001
         logger.error("风险分析结果解析失败：%s", e)
         result = {"project_name": project_name, "risk_level": "未知", "_parse_error": str(e)}
+    if isinstance(result, dict):
+        result["key_risks"] = _sort_risk_items(result.get("key_risks") or [])
+        result["suggestions"] = _sort_risk_items(result.get("suggestions") or [])
     result["_raw"] = raw
     return result

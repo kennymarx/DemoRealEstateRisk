@@ -18,6 +18,11 @@ from summary_manager import safe_filename
 
 logger = logging.getLogger(__name__)
 
+HIGH_RISK_TERMS = (
+    "违约", "逾期", "诉讼", "冻结", "被执行", "资金缺口", "资金压力", "资金链",
+    "流动性", "偿债", "到期压力", "债务", "现金流", "资产负债率高", "资不抵债", "大额亏损",
+)
+
 CREDIT_EXTRACTION_PROMPT = """你是授信报告信息抽取助手。请从图片中逐项提取可见事实，不做推断，不补造缺失内容。
 只返回 JSON 对象，日期尽量保留原文，金额保留数值与单位。字段无法确认时填 null。
 字段：report_date（报告日期/基准日）、project_total_scale（项目总规模）、
@@ -172,7 +177,90 @@ def analyze_comprehensive_risk(llm, project_name: str, credit_facts: list,
     result = extract_json(raw)
     if not isinstance(result, dict):
         raise ValueError("综合风险分析结果不是 JSON 对象")
+    result["key_risks"] = _sort_risk_items(result.get("key_risks") or [])
+    result["suggestions"] = _sort_risk_items(result.get("suggestions") or [])
+    if isinstance(result.get("financial_risks_not_reflected"), list):
+        result["financial_risks_not_reflected"] = _sort_risk_items(
+            result.get("financial_risks_not_reflected") or []
+        )
     return result
+
+
+def _extract_sort_text(item) -> str:
+    if isinstance(item, dict):
+        return " ".join(
+            str(item.get(key) or "")
+            for key in ("risk", "description", "title", "note", "data", "evidence", "summary", "suggestion", "action")
+        )
+    return str(item or "")
+
+
+def _risk_priority(risk) -> int:
+    text = _extract_sort_text(risk)
+    if not text:
+        return 2
+    level = str(risk.get("risk_level") or risk.get("severity") or risk.get("level") or "") if isinstance(risk, dict) else ""
+    if any(term in level for term in ("高", "严重", "重大")):
+        return 0
+    if any(term in text for term in (
+        "违约", "逾期", "诉讼", "冻结", "被执行", "现金短债比", "流动性", "偿债", "到期",
+        "债务", "负债率", "资不抵债", "亏损", "经营现金流", "现金流", "缺口", "高风险",
+        "暂缓新增", "暂停", "退出", "限制性准入", "提高首付比例", "强化增信"
+    )):
+        return 0
+    if any(term in text for term in (
+        "收入下降", "存货", "毛利率", "收窄", "筹资", "监测", "补充数据", "项目缺失",
+        "补充项目", "整改", "审慎", "预售资金", "受托支付"
+    )):
+        return 1
+    return 2
+
+
+def _sort_risk_items(items):
+    if not isinstance(items, list):
+        return items
+    ordered = sorted(items, key=_risk_priority)
+    return ordered
+
+
+def _format_financial_risks(risks, limit: int = 5) -> str:
+    if not risks:
+        return "未识别到授信报告未反映的财务风险"
+
+    ordered = sorted(enumerate(risks), key=lambda item: _risk_priority(item[1]))
+    lines = []
+    for index, (_, risk) in enumerate(ordered[:limit], 1):
+        if isinstance(risk, dict):
+            title = str(risk.get("risk") or risk.get("description") or "财务风险待核实").strip()
+            period = risk.get("fiscal_year") or risk.get("report_year")
+            accounts = risk.get("accounts")
+            evidence = risk.get("data") or risk.get("evidence")
+            note = risk.get("note")
+            priority = _risk_priority(risk)
+            prefix = "【高风险】" if priority == 0 else "【关注】"
+            parts = [f"{index}. {prefix}{title}"]
+            if period:
+                parts.append(f"期间：{period}")
+            if accounts:
+                parts.append(f"科目：{accounts}")
+            if evidence:
+                evidence = str(evidence).strip()
+                if len(evidence) > 180:
+                    evidence = evidence[:177].rstrip() + "..."
+                parts.append(f"依据：{evidence}")
+            if note:
+                note = str(note).strip()
+                if len(note) > 120:
+                    note = note[:117].rstrip() + "..."
+                parts.append(f"授信披露差异：{note}")
+            lines.append("\n".join(parts))
+        else:
+            lines.append(f"{index}. 【关注】{str(risk).strip()}")
+
+    omitted = len(risks) - len(lines)
+    if omitted > 0:
+        lines.append(f"另有 {omitted} 项风险，详见项目综合风险报告。")
+    return "\n\n".join(lines)
 
 
 def write_comprehensive_summary(records: list, json_path, excel_path) -> None:
@@ -205,7 +293,7 @@ def write_comprehensive_summary(records: list, json_path, excel_path) -> None:
             record.get("unsold_units"), record.get("unsold_ratio"),
             record.get("tail_end"), record.get("follow_on_funding_sufficiency"),
             record.get("risk_level"), record.get("risk_score"),
-            "\n".join(map(str, risks)), "\n".join(map(str, key_risks)),
+            _format_financial_risks(risks), "\n".join(map(str, key_risks)),
             "\n".join(map(str, suggestions)), record.get("report_path"),
         ])
 
@@ -219,6 +307,12 @@ def write_comprehensive_summary(records: list, json_path, excel_path) -> None:
     for row in worksheet.iter_rows(min_row=2):
         for cell in row:
             cell.alignment = Alignment(vertical="top", wrap_text=True)
+        risk_cell = row[14]
+        if "【高风险】" in str(risk_cell.value or ""):
+            risk_cell.fill = PatternFill("solid", fgColor="FFC7CE")
+            risk_cell.font = Font(color="9C0006", bold=True)
+        risk_line_count = str(risk_cell.value or "").count("\n") + 1
+        worksheet.row_dimensions[risk_cell.row].height = min(max(54, risk_line_count * 18), 180)
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
 
